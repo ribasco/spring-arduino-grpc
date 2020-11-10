@@ -7,5 +7,8 @@ open module spring.arduino.grpc {
     requires grpc.protobuf;
     requires annotations.api;
     requires com.google.common;
+    requires javafx.graphics;
+    requires javafx.controls;
+    requires org.slf4j;
     //requires java.annotation;
 }

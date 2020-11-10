@@ -8,24 +8,25 @@ import io.grpc.ManagedChannelBuilder;
 import io.grpc.StatusRuntimeException;
 import javafx.application.Application;
 import javafx.collections.FXCollections;
-import javafx.event.ActionEvent;
-import javafx.event.EventHandler;
-import javafx.scene.Node;
 import javafx.scene.Parent;
 import javafx.scene.Scene;
 import javafx.scene.control.Button;
-import javafx.scene.control.ListCell;
 import javafx.scene.control.ListView;
 import javafx.scene.layout.AnchorPane;
 import javafx.stage.Stage;
-import javafx.util.Callback;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
 
+import java.io.BufferedReader;
+import java.io.File;
+import java.io.InputStream;
+import java.io.InputStreamReader;
 import java.util.Collections;
 import java.util.List;
+import java.util.concurrent.Executors;
+import java.util.function.Consumer;
 
 @SpringBootApplication
 public class ArduinoGrpcApplication extends Application {
@@ -56,7 +57,9 @@ public class ArduinoGrpcApplication extends Application {
     private Scene initScene() {
         return new Scene(initRootNode());
     }
-    
+
+    private boolean rpcInitialized = false;
+
     private Parent initRootNode() {
         var root = new AnchorPane();
         root.setPrefWidth(1024);
@@ -66,15 +69,20 @@ public class ArduinoGrpcApplication extends Application {
         var btnLoadBoards = new Button("List Supported Boards");
 
         btnLoadBoards.setOnAction(event -> {
-            log.debug("Running gRPC");
-            if (!initGrpc()) {
-                log.error("Failed to connect to Arduino gRPC service");
-                throw new IllegalStateException("Failed to initialize arduino-cli gRPC service");
+            try {
+                log.debug("Running gRPC");
+                if (!initGrpc()) {
+                    log.error("Failed to connect to Arduino gRPC service");
+                    throw new IllegalStateException("Failed to initialize arduino-cli gRPC service");
+                } else {
+                    log.debug("Already initialized");
+                }
+                var items = getBoardListAll();
+                lvBoards.setItems(FXCollections.observableArrayList(items));
+            } catch (Exception e) {
+                e.printStackTrace();
             }
-            var items = getBoardListAll();
-            lvBoards.setItems(FXCollections.observableArrayList(items));
         });
-
 
         AnchorPane.setLeftAnchor(lvBoards, 10.0d);
         AnchorPane.setTopAnchor(lvBoards, 10.0d);
@@ -84,11 +92,17 @@ public class ArduinoGrpcApplication extends Application {
         AnchorPane.setLeftAnchor(btnLoadBoards, 10.0d);
         AnchorPane.setRightAnchor(btnLoadBoards, 10.0d);
         root.getChildren().addAll(btnLoadBoards, lvBoards);
-        
+
         return root;
     }
 
-    private boolean initGrpc() {
+    private boolean initGrpc() throws Exception {
+        if (rpcInitialized)
+            return true;
+        log.debug("Starting arduino-cli daemon");
+        if (process == null)
+            initArduinoCliProcess();
+        rpcInitialized = false;
         var initReq = Commands.InitReq.newBuilder().build();
         try {
             var res = blockingStub.init(initReq);
@@ -101,8 +115,10 @@ public class ArduinoGrpcApplication extends Application {
         } catch (StatusRuntimeException e) {
             log.error("Error init request", e);
             this.instance = null;
+        } finally {
+            rpcInitialized = this.instance != null;
         }
-        return instance != null;
+        return rpcInitialized;
     }
 
     private List<Board.BoardListItem> getBoardListAll() {
@@ -115,6 +131,41 @@ public class ArduinoGrpcApplication extends Application {
             log.error("Failed to obtain board list", e);
             return Collections.emptyList();
         }
+    }
+
+    private static class StreamGobbler implements Runnable {
+
+        private InputStream inputStream;
+
+        private Consumer<String> consumer;
+
+        public StreamGobbler(InputStream inputStream, Consumer<String> consumer) {
+            this.inputStream = inputStream;
+            this.consumer = consumer;
+        }
+
+        @Override
+        public void run() {
+            new BufferedReader(new InputStreamReader(inputStream)).lines().forEach(consumer);
+        }
+    }
+
+    private boolean isWindows = System.getProperty("os.name").toLowerCase().startsWith("windows");
+
+    private Process process;
+
+    private void initArduinoCliProcess() throws Exception {
+        var builder = new ProcessBuilder();
+        if (isWindows) {
+            builder.command("cmd.exe", "/c", "arduino-cli", "-v", "daemon");
+        } else {
+            builder.command("sh", "-c", "arduino-cli", "-v", "daemon");
+        }
+        builder.directory(new File(System.getProperty("user.home")));
+        process = builder.start();
+        StreamGobbler streamGobbler = new StreamGobbler(process.getInputStream(), log::info);
+        Executors.newSingleThreadExecutor().submit(streamGobbler);
+        //assert exitCode == 0;
     }
 
     private void checkInstance() {
